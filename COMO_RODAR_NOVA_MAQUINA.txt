@@ -1,0 +1,227 @@
+# ==============================================================================
+# COMO RODAR A APLICAÇÃO EM UMA NOVA MÁQUINA
+# ==============================================================================
+
+# ESTE ARQUIVO CONTÉM O PASSO A PASSO COMPLETO PARA CONFIGURAR E EXECUTAR
+# O PAINEL DE PRODUÇÃO AMBULATÓRIA EM QUALQUER MÁQUINA NOVA
+
+# ===========================================================================
+# REQUISITOS MÍNIMOS
+# ============================================================================
+
+## 1. Requisitos Gerais
+- Sistema operacional: Windows, Linux ou macOS
+- Python 3.12 ou superior
+- Conexão com a internet (para instalar dependências)
+- Permissão de administrador (se necessário para instalações do sistema)
+
+## 2. Requisitos Específicos do Aplicativo
+- Espaço livre em disco: ~500MB para a aplicação + dados
+- Permissão de escrita no diretório de instalação
+
+# ===========================================================================
+# INSTALAÇÃO E CONFIGURAÇÃO
+# ============================================================================
+
+## 3. Clonar o Repositório
+```bash
+# Clone o repositório do dashboard
+git clone <URL_DO_REPOSITÓRIO>
+cd dashboard
+```
+
+## 4. Configurar Ambiente Python
+```bash
+# Criar ambiente virtual Python
+python3 -m venv .venv
+
+# Ativar ambiente virtual
+# Windows:
+source .venv\Scripts\activate
+# Linux/macOS:
+source .venv/bin/activate
+
+# Atualizar pip
+pip install --upgrade pip
+
+# Instalar dependências
+pip install -r requirements.txt
+```
+
+## 5. Instalar a Aplicação
+```bash
+# Instalar a aplicação em modo desenvolvimento
+pip install -e .
+```
+
+## 6. Configurar Variáveis de Ambiente
+```bash
+# Criar arquivo .env na raíz do projeto
+# Usando nano (Linux/macOS) ou notepad (Windows)
+
+# Editar o arquivo .env:
+TABWIN_PA_DATA_DIR=/Caminho/para/DAOS/PA
+a 2025
+e 2026
+TABWIN_REFERENCE_DIR=/Caminho/para/TABWIN
+TABWIN_ANALYTICS_DB=/Caminho/para/dashboard/data/producao.sqlite3
+TABWIN_TEMP_DIR=/tmp
+```
+
+## 7. Preparar Dados (Apenas se necessário)
+```bash
+# Se precisar importar DBCs inicialmente:
+# 1. Colete os arquivos DBC na pasta TABWIN_PA_DATA_DIR
+# 2. Execute o script de importação:
+python3 -m app.ingest
+
+# Para reprocessar arquivos:
+# Altere algum arquivo DBC ou remova entradas de source_files
+# Execute novamente: python3 -m app.ingest
+```
+
+# ===========================================================================
+# EXECUTANDO A APLICAÇÃO
+# ============================================================================
+
+## 8. Iniciar o Servidor
+```bash
+# Método 1: Comando direto
+python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+# Método 2: Usando script de ajuda
+# Criar arquivo run.bat (Windows) ou run.sh (Linux/macOS)
+# Windows (run.bat):
+@echo off
+./.venv/Scripts/python.exe -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+# Linux/macOS (run.sh):
+#!/bin/bash
+source .venv/bin/activate
+python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+# Executar o script
+# Windows: run.bat
+# Linux/macOS: chmod +x run.sh && ./run.sh
+```
+
+## 9. Acessando a Aplicação
+```bash
+# No mesmo computador:
+# Abrir navegador e acessar: http://localhost:8000
+
+# Em outra máquina na rede:
+# Abrir navegador e acessar: http://IP_DO_SERVIDOR:8000
+# (encontrar IP do servidor com: ip addr show ou ifconfig)
+```
+
+# ===========================================================================
+# TROUBLESHOOTING E ERROS COMUNS
+# ============================================================================
+
+## 10. Resolução de Problemas
+
+### Erro: "Módulo não encontrado: uvicorn"
+```bash
+pip install uvicorn
+```
+
+### Erro: "Permissão negada"
+```bash
+# Garantir que tem permissão de escrita no diretório
+chmod -R 755 .
+```
+
+### Erro: "Variável de ambiente não encontrada"
+```bash
+# Verificar variáveis no arquivo .env
+# Reexecutar: source .env (Linux/macOS) ou set /A VAR=<valor> (Windows)
+```
+
+### Erro: "Porta 8000 já está em uso"
+```bash
+# Verificar processos na porta 8000
+lsof -i :8000  # Linux/macOS
+netstat -an | findstr :8000  # Windows
+
+# Matar processo:
+# Linux/macOS: kill $(lsof -t -i :8000)
+# Windows: taskkill /F /PID <PID>
+```
+
+## 11. Primeiros Passos após Instalação
+```bash
+# 1. Verificar ambiente Python
+python3 --version
+pip --version
+
+# 2. Testar importação
+python3 -c "import app; print('Aplicação importada com sucesso')"
+
+# 3. Testar servidor (apenas um teste rápido)
+# Em outro terminal, executar:
+curl http://localhost:8000/api/status
+```
+
+# ===========================================================================
+# MANUTENÇÃO E ATUALIZAÇÕES
+# ============================================================================
+
+## 12. Manutenção Regular
+```bash
+# Atualizar dependências regularmente
+pip install --upgrade -r requirements.txt
+
+# Verificar logs regularmente
+# Os logs do uvicorn são exibidos no terminal onde o servidor está rodando
+
+# Fazer backup dos dados
+# Criar backup do diretório data/: cp -r data/ data_backup_$(date +%Y%m%d)
+```
+
+## 13. Reiniciar a Aplicação
+```bash
+# Windows:
+# 1. Pressione Ctrl+C no terminal onde a aplicação está rodando
+# 2. Executar novamente o script de inicialização
+
+# Linux/macOS:
+# 1. Pressione Ctrl+C no terminal onde a aplicação está rodando
+# 2. Executar novamente: ./run.sh
+```
+
+# ===========================================================================
+# INFORMAÇÕES ADICIONAIS
+# ============================================================================
+
+## 14. Arquivos Importantes
+- `app/`: Código Python principal
+- `static/`: Arquivos CSS e JavaScript
+- `img/`: Imagens (brasao.png)
+- `data/`: Banco de dados SQLite
+- `requirements.txt`: Dependências Python
+- `install.bat`: Script de instalação (Windows)
+- `README.md`: Documentação
+
+## 15. Perguntas Frequentes
+
+### Q: Posso usar um banco de dados diferente do SQLite?
+R: Sim, altere TABWIN_ANALYTICS_DB para apontar para seu banco de dados preferido.
+
+### Q: Como importar múltiplos arquivos DBC?
+R: Execute `python3 -m app.ingest` e arraste os arquivos DBC para a interface web ou configure o script para importar um diretório.
+
+### Q: Como acessar a partir de outro dispositivo?
+R: Encontre o IP do servidor com `ip addr show` (Linux/macOS) ou `ipconfig` (Windows) e acesse `http://IP:8000` no dispositivo.
+
+### Q: Posso usar HTTPS?
+R: Sim, mas requer configuração adicional de certificado TLS. Para produção, recomendo usar um proxy reverso como nginx.
+
+# ===========================================================================
+# FIM DO GUIA DE INSTALAÇÃO
+# ============================================================================
+
+# Siga estes passos e você terá a aplicação completamente funcional em qualquer máquina nova!
+# Se encontrar problemas, verifique os logs ou procure ajuda na documentação.
+
+# Última atualização: $(date +%Y-%m-%d)

@@ -1,0 +1,4 @@
+fastapi>=0.115,<1
+uvicorn[standard]>=0.34,<1
+dbfread>=2.0.7,<3
+pyreaddbc>=2.0.4,<3
