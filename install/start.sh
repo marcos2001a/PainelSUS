@@ -27,7 +27,7 @@ if [[ -f "$PID_FILE" ]]; then
 
   if kill -0 "$PID" 2>/dev/null; then
     COMMAND="$(ps -p "$PID" -o args= 2>/dev/null || true)"
-    if [[ "$COMMAND" == *"-m uvicorn app.main:app --host 127.0.0.1 --port 8000"* ]]; then
+    if [[ "$COMMAND" == *"-m uvicorn app.main:app --host 0.0.0.0 --port 8000"* ]]; then
       echo "A aplicação já está em execução (PID $PID)."
       exit 0
     fi
@@ -39,7 +39,7 @@ if [[ -f "$PID_FILE" ]]; then
 fi
 
 cd "$PROJECT_DIR"
-nohup "$PYTHON" -m uvicorn app.main:app --host 127.0.0.1 --port 8000 \
+nohup "$PYTHON" -m uvicorn app.main:app --host 0.0.0.0 --port 8000 \
   >>"$LOG_FILE" 2>&1 </dev/null &
 PID=$!
 printf '%s\n' "$PID" > "$PID_FILE"

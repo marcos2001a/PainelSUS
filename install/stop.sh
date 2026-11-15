@@ -22,7 +22,7 @@ if ! kill -0 "$PID" 2>/dev/null; then
 fi
 
 COMMAND="$(ps -p "$PID" -o args= 2>/dev/null || true)"
-if [[ "$COMMAND" != *"-m uvicorn app.main:app --host 127.0.0.1 --port 8000"* ]]; then
+if [[ "$COMMAND" != *"-m uvicorn app.main:app --host 0.0.0.0 --port 8000"* ]]; then
   echo "Erro: o PID registrado ($PID) não corresponde ao servidor desta aplicação." >&2
   echo "O processo não foi encerrado; verifique $PID_FILE." >&2
   exit 1
