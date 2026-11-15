@@ -18,8 +18,9 @@ from typing import Callable
 from dbfread import DBF
 from pyreaddbc import dbc2dbf
 
-from .config import DATA_DIR, DATABASE_PATH, REFERENCE_DIR, TEMP_DIR
-from .database import connect, initialize_database
+from .config import CNES_FILE, DATA_DIR, REFERENCE_DIR, TEMP_DIR
+from .cnes import cnes_filter_signature, load_cnes_registry
+from .database import active_database_path, connect, initialize_database
 
 FILE_PATTERN = re.compile(r"^PASP(\d{2})(\d{2})[a-d]\.dbc$", re.IGNORECASE)
 REQUIRED_FIELDS = {
@@ -32,6 +33,7 @@ REQUIRED_FIELDS = {
     "PA_VALAPR",
 }
 CHUNK_SIZE = 50_000
+DEMOGRAPHICS_VERSION = 1
 ProgressCallback = Callable[[dict], None]
 
 
@@ -98,17 +100,57 @@ def _flush(
     return count
 
 
+def _flush_demographics(
+    connection: sqlite3.Connection,
+    source_id: int,
+    totals: dict[tuple[str, ...], list[int]],
+) -> int:
+    if not totals:
+        return 0
+    connection.executemany(
+        """
+        INSERT INTO production_demographics (
+            source_file_id, cnes, competence, procedure_code, age_flag, age_value,
+            sex, race, cid_primary, cid_secondary, cid_associated,
+            submitted_quantity, approved_quantity
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (
+            source_file_id, cnes, competence, procedure_code, age_flag, age_value,
+            sex, race, cid_primary, cid_secondary, cid_associated
+        ) DO UPDATE SET
+            submitted_quantity =
+                production_demographics.submitted_quantity + excluded.submitted_quantity,
+            approved_quantity =
+                production_demographics.approved_quantity + excluded.approved_quantity
+        """,
+        [
+            (source_id, *key, *values)
+            for key, values in totals.items()
+        ],
+    )
+    count = len(totals)
+    totals.clear()
+    return count
+
+
+def _dimension(value) -> str:
+    return "" if value is None else str(value).strip().upper()
+
+
 def _import_one(
     path: Path,
     data_dir: Path,
     connection: sqlite3.Connection,
+    allowed_cnes: set[str],
+    filter_signature: str,
     temp_dir: Path = TEMP_DIR,
 ) -> dict:
     stat = path.stat()
     relative_path = path.relative_to(data_dir).as_posix()
     previous = connection.execute(
         """
-        SELECT id, size_bytes, modified_ns
+        SELECT id, size_bytes, modified_ns, cnes_filter_signature,
+               demographics_version
         FROM source_files
         WHERE relative_path = ?
         """,
@@ -118,6 +160,8 @@ def _import_one(
         previous
         and previous["size_bytes"] == stat.st_size
         and previous["modified_ns"] == stat.st_mtime_ns
+        and previous["cnes_filter_signature"] == filter_signature
+        and previous["demographics_version"] >= DEMOGRAPHICS_VERSION
     ):
         return {"file": path.name, "status": "skipped_unchanged"}
 
@@ -153,6 +197,10 @@ def _import_one(
                 "DELETE FROM production WHERE source_file_id = ?",
                 (source_id,),
             )
+            connection.execute(
+                "DELETE FROM production_demographics WHERE source_file_id = ?",
+                (source_id,),
+            )
         else:
             cursor = connection.execute(
                 """
@@ -167,9 +215,14 @@ def _import_one(
         totals: dict[tuple[str, str, str], list[int]] = defaultdict(
             lambda: [0, 0, 0, 0]
         )
+        demographic_totals: dict[tuple[str, ...], list[int]] = defaultdict(
+            lambda: [0, 0]
+        )
         record_count = 0
         skipped_rows = 0
+        filtered_rows = 0
         grouped_rows = 0
+        demographic_groups = 0
         for row in table:
             record_count += 1
             cnes = str(row.get("PA_CODUNI") or "").strip()
@@ -183,24 +236,56 @@ def _import_one(
             ):
                 skipped_rows += 1
                 continue
+            if cnes not in allowed_cnes:
+                filtered_rows += 1
+                continue
 
             values = totals[(cnes, competence, procedure)]
             values[0] += _integer(row.get("PA_QTDPRO"))
             values[1] += _integer(row.get("PA_QTDAPR"))
             values[2] += _cents(row.get("PA_VALPRO"))
             values[3] += _cents(row.get("PA_VALAPR"))
+            demographic_key = (
+                cnes,
+                competence,
+                procedure,
+                _dimension(row.get("PA_FLIDADE")),
+                _dimension(row.get("PA_IDADE")),
+                _dimension(row.get("PA_SEXO")),
+                _dimension(row.get("PA_RACACOR")),
+                _dimension(row.get("PA_CIDPRI")),
+                _dimension(row.get("PA_CIDSEC")),
+                _dimension(row.get("PA_CIDCAS")),
+            )
+            demographic_values = demographic_totals[demographic_key]
+            demographic_values[0] += _integer(row.get("PA_QTDPRO"))
+            demographic_values[1] += _integer(row.get("PA_QTDAPR"))
             if record_count % CHUNK_SIZE == 0:
                 grouped_rows += _flush(connection, source_id, totals)
+                demographic_groups += _flush_demographics(
+                    connection, source_id, demographic_totals
+                )
 
         grouped_rows += _flush(connection, source_id, totals)
+        demographic_groups += _flush_demographics(
+            connection, source_id, demographic_totals
+        )
         connection.execute(
             """
             UPDATE source_files
             SET size_bytes = ?, modified_ns = ?, record_count = ?,
-                imported_at = CURRENT_TIMESTAMP
+                imported_at = CURRENT_TIMESTAMP, cnes_filter_signature = ?,
+                demographics_version = ?
             WHERE id = ?
             """,
-            (stat.st_size, stat.st_mtime_ns, record_count, source_id),
+            (
+                stat.st_size,
+                stat.st_mtime_ns,
+                record_count,
+                filter_signature,
+                DEMOGRAPHICS_VERSION,
+                source_id,
+            ),
         )
         connection.commit()
         return {
@@ -208,7 +293,9 @@ def _import_one(
             "status": "imported",
             "records": record_count,
             "groups": grouped_rows,
+            "demographic_groups": demographic_groups,
             "skipped_rows": skipped_rows,
+            "filtered_rows": filtered_rows,
         }
     except Exception:
         connection.rollback()
@@ -217,7 +304,11 @@ def _import_one(
         dbf_path.unlink(missing_ok=True)
 
 
-def _load_references(connection: sqlite3.Connection, reference_dir: Path) -> None:
+def _load_references(
+    connection: sqlite3.Connection,
+    reference_dir: Path,
+    allowed_cnes: set[str],
+) -> None:
     facility_file = reference_dir / "CNESBR.dbf"
     if facility_file.is_file():
         table = DBF(
@@ -236,13 +327,11 @@ def _load_references(connection: sqlite3.Connection, reference_dir: Path) -> Non
                 ON CONFLICT (cnes) DO UPDATE SET name = excluded.name
                 """,
                 (
-                    (
-                        str(row.get("CNES") or "").strip(),
-                        str(row.get(name_field) or "").strip(),
-                    )
+                    (cnes, name)
                     for row in table
-                    if re.fullmatch(r"\d{7}", str(row.get("CNES") or "").strip())
-                    and str(row.get(name_field) or "").strip()
+                    if (cnes := str(row.get("CNES") or "").strip()) in allowed_cnes
+                    and re.fullmatch(r"\d{7}", cnes)
+                    and (name := str(row.get(name_field) or "").strip())
                 ),
             )
 
@@ -283,13 +372,18 @@ def _load_references(connection: sqlite3.Connection, reference_dir: Path) -> Non
 
 def import_directory(
     data_dir: Path = DATA_DIR,
-    database_path: Path = DATABASE_PATH,
+    database_path: Path | None = None,
     reference_dir: Path = REFERENCE_DIR,
     temp_dir: Path = TEMP_DIR,
     limit_files: int | None = None,
     on_progress: ProgressCallback | None = None,
 ) -> dict:
+    if database_path is None:
+        database_path = active_database_path()
     initialize_database(database_path)
+    registry = load_cnes_registry(CNES_FILE)
+    allowed_cnes = set(registry)
+    filter_signature = cnes_filter_signature(registry)
     files = discover_files(data_dir)
     if not files:
         raise FileNotFoundError(f"Nenhum arquivo PASP DBC encontrado em {data_dir}")
@@ -311,7 +405,9 @@ def import_directory(
                     }
                 )
             try:
-                result = _import_one(path, data_dir, connection, temp_dir)
+                result = _import_one(
+                    path, data_dir, connection, allowed_cnes, filter_signature, temp_dir
+                )
                 if result["status"] == "imported":
                     summary["imported"] += 1
                 else:
@@ -338,7 +434,14 @@ def import_directory(
                             **error,
                         }
                     )
-        _load_references(connection, reference_dir)
+        _load_references(connection, reference_dir, allowed_cnes)
+        connection.executemany(
+            """
+            INSERT INTO facilities (cnes, name) VALUES (?, ?)
+            ON CONFLICT (cnes) DO UPDATE SET name = excluded.name
+            """,
+            ((cnes, name) for cnes, name in registry.items()),
+        )
         connection.commit()
     return summary
 

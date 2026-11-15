@@ -24,6 +24,7 @@ Este projeto é um painel web para monitoramento e análise de produção ambula
 ├── img/                         # Imagens
 │   └── brasao.png               # Brasão do SUS (usado como logo e favicon)
 ├── .venv/                       # Ambiente virtual Python
+├── install/                     # Instaladores e scripts de serviço
 ├── requirements.txt             # Dependências do Python
 ├── README.md                    # Este documento
 └── run.bat                      # Script de inicialização do Windows
@@ -75,6 +76,7 @@ pyreaddbc>=2.0.4,<3
 | `size_bytes` | INTEGER NOT NULL | Tamanho do arquivo em bytes |
 | `modified_ns` | INTEGER NOT NULL | Timestamp de modificação em nanosegundos |
 | `record_count` | INTEGER NOT NULL | Número de registros no arquivo |
+| `demographics_version` | INTEGER NOT NULL DEFAULT 0 | Versão dos agregados demográficos importados |
 | `imported_at` | TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP | Timestamp de importação |
 
 #### `production`
@@ -90,6 +92,13 @@ pyreaddbc>=2.0.4,<3
 | `approved_value_cents` | INTEGER NOT NULL DEFAULT 0 | Valor aprovado (em centavos) |
 
 **Chave Primária Composta**: `(source_file_id, cnes, competence, procedure_code)`
+
+#### `production_demographics`
+Armazena quantidades agregadas por arquivo, CNES, competência, procedimento,
+idade registrada, sexo, raça/cor e CID principal/secundário/associado. CNS,
+autorização e município de residência não são armazenados nesta tabela.
+`submitted_quantity` e `approved_quantity` guardam as quantidades apresentadas
+e aprovadas.
 
 #### `facilities`
 | Coluna | Tipo | Descrição |
@@ -289,12 +298,16 @@ O backend classifica procedimentos automaticamente usando palavras-chave:
 2. **Primeira Importação**:
    - Clique em "Importar DBCs" na interface
    - Os arquivos DBC são expandidos temporariamente usando `pyreaddbc`
-   - Os dados são agregados por CNES, competência e procedimento
+   - A produção geral é agregada por CNES, competência e procedimento; os
+     relatórios **Diversos** usam agregados separados por idade, sexo, raça/cor
+     e CID
    - Os cadastros de unidades e procedimentos são carregados dos arquivos DBF de referência
 
 3. **Importações Subsequentes**:
-   - Arquivos com mesmo tamanho e timestamp são ignorados
-   - Apenas alterações são processadas (atualizações incrementais)
+   - Arquivos inalterados são ignorados quando os agregados necessários já
+     estão atualizados
+   - Arquivos importados por versões anteriores são reprocessados para
+     preencher os agregados dos relatórios **Diversos**
 
 ## Como Executar
 
@@ -328,7 +341,9 @@ O backend classifica procedimentos automaticamente usando palavras-chave:
 
 ### Scripts de Wrapper Windows (`run.bat`)
 
-Para convenience no Windows, há um script `run.bat`:
+No Windows, execute `install\install.bat` para preparar o ambiente Python e
+instalar as dependências. O script usa o instalador Python 3.13.12 incluído
+quando não encontra Python 3.12 ou 3.13. Depois, use `run.bat`:
 
 ```batch
 @echo off

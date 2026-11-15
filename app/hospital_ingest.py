@@ -14,8 +14,9 @@ from typing import Callable
 from dbfread import DBF
 from pyreaddbc import dbc2dbf
 
-from .config import DATABASE_PATH, HOSPITAL_DATA_DIR, REFERENCE_DIR, TEMP_DIR
-from .database import connect, initialize_database
+from .config import HOSPITAL_CNES_FILE, HOSPITAL_DATA_DIR, REFERENCE_DIR, TEMP_DIR
+from .cnes import cnes_filter_signature, load_cnes_registry
+from .database import active_database_path, connect, initialize_database
 
 FILE_PATTERN = re.compile(r"^RDSP\d{4}\.dbc$", re.IGNORECASE)
 REQUIRED_FIELDS = {"ANO_CMPT", "MES_CMPT", "CNES", "PROC_REA", "VAL_TOT", "MORTE", "DIAS_PERM"}
@@ -67,14 +68,27 @@ def _flush(connection: sqlite3.Connection, source_id: int, totals: dict) -> int:
     return count
 
 
-def _import_one(path: Path, data_dir: Path, connection: sqlite3.Connection, temp_dir: Path) -> dict:
+def _import_one(
+    path: Path,
+    data_dir: Path,
+    connection: sqlite3.Connection,
+    allowed_cnes: set[str],
+    filter_signature: str,
+    temp_dir: Path,
+) -> dict:
     stat = path.stat()
     relative_path = path.relative_to(data_dir).as_posix()
     previous = connection.execute(
-        "SELECT id, size_bytes, modified_ns FROM hospital_source_files WHERE relative_path = ?",
+        "SELECT id, size_bytes, modified_ns, cnes_filter_signature "
+        "FROM hospital_source_files WHERE relative_path = ?",
         (relative_path,),
     ).fetchone()
-    if previous and previous["size_bytes"] == stat.st_size and previous["modified_ns"] == stat.st_mtime_ns:
+    if (
+        previous
+        and previous["size_bytes"] == stat.st_size
+        and previous["modified_ns"] == stat.st_mtime_ns
+        and previous["cnes_filter_signature"] == filter_signature
+    ):
         return {"file": path.name, "status": "skipped_unchanged"}
 
     temp_dir.mkdir(parents=True, exist_ok=True)
@@ -105,7 +119,7 @@ def _import_one(path: Path, data_dir: Path, connection: sqlite3.Connection, temp
             source_id = cursor.lastrowid
 
         totals = defaultdict(lambda: [0, 0, 0, 0])
-        record_count = skipped_rows = grouped_rows = 0
+        record_count = skipped_rows = filtered_rows = grouped_rows = 0
         for row in table:
             record_count += 1
             cnes = str(row.get("CNES") or "").strip()
@@ -120,6 +134,9 @@ def _import_one(path: Path, data_dir: Path, connection: sqlite3.Connection, temp
             ):
                 skipped_rows += 1
                 continue
+            if cnes not in allowed_cnes:
+                filtered_rows += 1
+                continue
             values = totals[(cnes, year + month, procedure)]
             values[0] += 1
             values[1] += 1 if _integer(row.get("MORTE")) else 0
@@ -131,14 +148,16 @@ def _import_one(path: Path, data_dir: Path, connection: sqlite3.Connection, temp
         grouped_rows += _flush(connection, source_id, totals)
         connection.execute(
             """UPDATE hospital_source_files
-               SET size_bytes = ?, modified_ns = ?, record_count = ?, imported_at = CURRENT_TIMESTAMP
+               SET size_bytes = ?, modified_ns = ?, record_count = ?,
+                   imported_at = CURRENT_TIMESTAMP, cnes_filter_signature = ?
                WHERE id = ?""",
-            (stat.st_size, stat.st_mtime_ns, record_count, source_id),
+            (stat.st_size, stat.st_mtime_ns, record_count, filter_signature, source_id),
         )
         connection.commit()
         return {
             "file": path.name, "status": "imported", "records": record_count,
             "groups": grouped_rows, "skipped_rows": skipped_rows,
+            "filtered_rows": filtered_rows,
         }
     except Exception:
         connection.rollback()
@@ -147,7 +166,11 @@ def _import_one(path: Path, data_dir: Path, connection: sqlite3.Connection, temp
         dbf_path.unlink(missing_ok=True)
 
 
-def _load_references(connection: sqlite3.Connection, reference_dir: Path) -> None:
+def _load_references(
+    connection: sqlite3.Connection,
+    reference_dir: Path,
+    allowed_cnes: set[str],
+) -> None:
     for path in (reference_dir / "DBF" / "TB_SIGTAW.DBF", reference_dir / "DBF" / "TB_SIGTAW.dbf"):
         if not path.is_file():
             continue
@@ -179,6 +202,7 @@ def _load_references(connection: sqlite3.Connection, reference_dir: Path) -> Non
                 (
                     (cnes, name) for row in table
                     if (cnes := str(row.get("CNES") or "").strip())
+                    and cnes in allowed_cnes
                     and re.fullmatch(r"\d{7}", cnes)
                     and (name := str(row.get("NOMEFANT") or "").strip())
                 ),
@@ -188,16 +212,24 @@ def _load_references(connection: sqlite3.Connection, reference_dir: Path) -> Non
 
 def import_directory(
     data_dir: Path = HOSPITAL_DATA_DIR,
-    database_path: Path = DATABASE_PATH,
+    database_path: Path | None = None,
     reference_dir: Path = REFERENCE_DIR,
     temp_dir: Path = TEMP_DIR,
     limit_files: int | None = None,
     on_progress: ProgressCallback | None = None,
+    files: list[Path] | None = None,
 ) -> dict:
+    if database_path is None:
+        database_path = active_database_path()
     initialize_database(database_path)
-    files = discover_files(data_dir)
+    registry = load_cnes_registry(HOSPITAL_CNES_FILE)
+    allowed_cnes = set(registry)
+    filter_signature = cnes_filter_signature(registry)
+    files = discover_files(data_dir) if files is None else sorted(files, key=lambda path: path.name.upper())
     if not files:
         raise FileNotFoundError(f"Nenhum arquivo RDSP DBC encontrado em {data_dir}")
+    if any(not FILE_PATTERN.fullmatch(path.name) or not path.is_file() for path in files):
+        raise ValueError("A lista de importação contém um arquivo inválido.")
     if limit_files is not None:
         if limit_files < 1:
             raise ValueError("O limite de arquivos deve ser positivo.")
@@ -209,7 +241,9 @@ def import_directory(
             if on_progress:
                 on_progress({"current": index, "total": len(files), "file": path.name, "status": "processing"})
             try:
-                result = _import_one(path, data_dir, connection, temp_dir)
+                result = _import_one(
+                    path, data_dir, connection, allowed_cnes, filter_signature, temp_dir
+                )
                 summary["imported" if result["status"] == "imported" else "skipped"] += 1
                 if on_progress:
                     on_progress({"current": index, "total": len(files), "status": "processing", **result})
@@ -219,7 +253,12 @@ def import_directory(
                 summary["errors"].append(error)
                 if on_progress:
                     on_progress({"current": index, "total": len(files), "status": "error", **error})
-        _load_references(connection, reference_dir)
+        _load_references(connection, reference_dir, allowed_cnes)
+        connection.executemany(
+            """INSERT INTO facilities (cnes, name) VALUES (?, ?)
+               ON CONFLICT (cnes) DO UPDATE SET name = excluded.name""",
+            ((cnes, name) for cnes, name in registry.items()),
+        )
         connection.commit()
     return summary
 
