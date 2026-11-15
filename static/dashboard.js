@@ -6,6 +6,14 @@ let toastTimer = null;
 let current = null;
 let detailTab = 'procedures';
 let page = 1;
+let unitResults = [];
+let hospitalReport = null;
+let hospitalReportDocument = null;
+let hospitalPage = 1;
+let hospitalImportTimer = null;
+let hospitalPeriodInitialized = false;
+let hospitalDocumentPeriodInitialized = false;
+const HOSPITAL_PAGE_SIZE = 20;
 
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const fmt = n => Number(n || 0).toLocaleString('pt-BR');
@@ -21,7 +29,11 @@ const competenceLabel = c => c ? `${c.slice(4)}/${c.slice(0, 4)}` : '';
 function showView(view) {
   $('overview').hidden = view !== 'overview';
   $('reports').hidden = view !== 'reports';
+  $('hospital').hidden = view !== 'hospital';
+  $('hospitalReports').hidden = view !== 'hospitalReports';
   document.querySelectorAll('.nav-item').forEach(a => a.classList.toggle('active', a.dataset.view === view));
+  if (view === 'hospital') loadHospitalStatus();
+  if (view === 'hospitalReports') loadHospitalStatus();
 }
 
 function toast(text) {
@@ -44,7 +56,19 @@ async function searchUnits(term) {
   const res = await fetch(`/api/units?q=${encodeURIComponent(term)}`);
   if (!res.ok) return;
   const list = await res.json();
+  unitResults = list;
   $('unitList').innerHTML = list.map(u => `<option value="${esc(u.cnes)}">${esc(u.name)}</option>`).join('');
+  updateSelectedUnitBadge($('unitSearch').value);
+}
+
+function updateSelectedUnitBadge(value, name = '') {
+  const badge = $('selectedUnitBadge');
+  const selected = String(value || '').trim();
+  const unit = unitResults.find(item => item.cnes === unitCode(selected))
+    || unitResults.find(item => item.name && item.name.toLocaleLowerCase('pt-BR') === selected.toLocaleLowerCase('pt-BR'));
+  const unitName = name || unit?.name;
+  badge.textContent = unitName || '';
+  badge.hidden = !unitName;
 }
 
 async function loadStatus() {
@@ -65,6 +89,167 @@ async function fetchReport({ cnes, start, end, compare, exams, procedures }) {
   return data;
 }
 
+async function fetchHospitalReport({ cnes, start, end, compare }) {
+  const params = new URLSearchParams({ cnes, start, end, compare });
+  const res = await fetch(`/api/hospital/report?${params}`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(errorText(data));
+  return data;
+}
+
+async function loadHospitalStatus() {
+  try {
+    const res = await fetch('/api/hospital/status');
+    if (!res.ok) return;
+    const status = await res.json();
+    $('hospitalDataStatus').textContent = status.imported_files
+      ? `${fmt(status.imported_files)} arquivos RDSP importados · ${fmt(status.source_records)} registros de origem · ${competenceLabel(status.first_competence)} a ${competenceLabel(status.last_competence)}`
+      : `${fmt(status.available_files)} arquivos RDSP disponíveis · importe os DBCs para consultar.`;
+    if (status.last_competence && !hospitalPeriodInitialized) {
+      const year = status.last_competence.slice(0, 4);
+      $('hospitalStart').value = `${year}-01`;
+      $('hospitalEnd').value = `${year}-${status.last_competence.slice(4)}`;
+      hospitalPeriodInitialized = true;
+    }
+    if (status.last_competence && !hospitalDocumentPeriodInitialized) {
+      const year = status.last_competence.slice(0, 4);
+      $('hospitalReportStart').value = `${year}-01`;
+      $('hospitalReportEnd').value = `${year}-${status.last_competence.slice(4)}`;
+      hospitalDocumentPeriodInitialized = true;
+    }
+    if (status.import?.running) watchHospitalImport();
+  } catch (_) {
+    $('hospitalDataStatus').textContent = 'Não foi possível consultar o status dos arquivos RDSP.';
+  }
+}
+
+async function applyHospitalFilters() {
+  const cnes = unitCode($('hospitalUnit').value);
+  const start = $('hospitalStart').value;
+  const end = $('hospitalEnd').value;
+  if (!cnes || !start || !end) {
+    $('hospitalMessage').textContent = 'Informe a unidade e o período para consultar a produção hospitalar.';
+    return;
+  }
+  if (start > end) {
+    $('hospitalMessage').textContent = 'O mês inicial deve ser igual ou anterior ao mês final.';
+    return;
+  }
+  $('hospitalMessage').textContent = 'Carregando produção hospitalar…';
+  try {
+    hospitalReport = await fetchHospitalReport({ cnes, start, end, compare: $('hospitalCompare').checked });
+    hospitalPage = 1;
+    $('hospitalMessage').textContent = hospitalReport.summary.admissions
+      ? '' : 'Não há internações para esta unidade no período selecionado.';
+    renderHospitalReport();
+  } catch (err) {
+    hospitalReport = null;
+    renderHospitalReport();
+    $('hospitalMessage').textContent = err.message;
+  }
+}
+
+function renderHospitalReport() {
+  const report = hospitalReport;
+  $('hospitalPrevLegend').hidden = !report?.compare;
+  if (!report) {
+    $('hAdmissions').textContent = $('hValue').textContent = $('hDeaths').textContent = $('hStay').textContent = '—';
+    $('hospitalChart').innerHTML = '<div class="empty-state">Selecione uma unidade e um período.</div>';
+    $('hospitalSummary').innerHTML = '<div class="empty-state">Os indicadores aparecerão após consultar.</div>';
+    $('hospitalBody').innerHTML = '<tr><td colspan="6" class="table-empty">Aguardando consulta.</td></tr>';
+    $('hospitalFoot').textContent = 'Aguardando filtros';
+    $('hospitalPage').textContent = 'Página 1 de 1';
+    $('hospitalPrev').disabled = $('hospitalNext').disabled = true;
+    return;
+  }
+  const summary = report.summary;
+  $('hAdmissions').textContent = fmt(summary.admissions);
+  $('hAdmissionsFoot').textContent = report.compare
+    ? `${signed(summary.difference)} vs. mesmo período do ano anterior`
+    : 'AIHs processadas no período';
+  $('hValue').textContent = money(summary.value_cents);
+  $('hDeaths').textContent = fmt(summary.deaths);
+  $('hStay').textContent = `${summary.average_stay.toLocaleString('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} dias`;
+  $('hospitalPrevLegend').hidden = !report.compare;
+  const chartRows = report.monthly.map(row => ({
+    label: row.label, total_qty: row.admissions, prev_total_qty: row.previous_admissions,
+  }));
+  $('hospitalChart').innerHTML = chartSvg(chartRows, report.compare);
+  $('hospitalSummary').innerHTML = [
+    ['Período', report.period.label],
+    ['AIHs no ano anterior', report.compare ? fmt(summary.previous_admissions) : 'Comparação desativada'],
+    ['Dias de permanência', fmt(summary.stay_days)],
+    ['Mortalidade hospitalar', summary.admissions ? `${(summary.deaths * 100 / summary.admissions).toLocaleString('pt-BR', { maximumFractionDigits: 1 })}%` : '0%'],
+  ].map(([label, value]) => `<div class="hospital-summary-row"><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join('');
+
+  const term = $('hospitalSearch').value.trim().toLocaleLowerCase('pt-BR');
+  const rows = report.procedure_items.filter(row => !term
+    || row.code.toLocaleLowerCase('pt-BR').includes(term)
+    || row.name.toLocaleLowerCase('pt-BR').includes(term));
+  const pages = Math.max(1, Math.ceil(rows.length / HOSPITAL_PAGE_SIZE));
+  hospitalPage = Math.min(hospitalPage, pages);
+  const visibleRows = rows.slice((hospitalPage - 1) * HOSPITAL_PAGE_SIZE, hospitalPage * HOSPITAL_PAGE_SIZE);
+  $('hospitalBody').innerHTML = visibleRows.length ? visibleRows.map(row => `<tr>
+    <td><span class="procedure-name">${esc(row.name || 'Sem descrição cadastrada')}</span><span class="procedure-code">${esc(row.code)}</span></td>
+    <td>${fmt(row.admissions)}</td>
+    <td>${report.compare ? fmt(row.previous_admissions) : '—'}</td>
+    <td>${fmt(row.deaths)}</td>
+    <td>${fmt(row.stay_days)}</td>
+    <td>${money(row.value_cents)}</td>
+  </tr>`).join('') : '<tr><td colspan="6" class="table-empty">Nenhum procedimento encontrado.</td></tr>';
+  $('hospitalFoot').textContent = `${fmt(rows.length)} procedimentos realizados`;
+  $('hospitalPage').textContent = `Página ${hospitalPage} de ${pages}`;
+  $('hospitalPrev').disabled = hospitalPage <= 1;
+  $('hospitalNext').disabled = hospitalPage >= pages;
+}
+
+async function startHospitalImport() {
+  try {
+    const res = await fetch('/api/hospital/import', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(errorText(data));
+    watchHospitalImport();
+  } catch (err) {
+    toast(err.message);
+  }
+}
+
+function watchHospitalImport() {
+  const drawer = $('importDrawer');
+  drawer.hidden = false;
+  drawer.classList.remove('done');
+  clearInterval(hospitalImportTimer);
+  const tick = async () => {
+    const res = await fetch('/api/hospital/import/status');
+    if (!res.ok) return;
+    const status = await res.json();
+    const progress = status.total ? Math.round(status.current * 100 / status.total) : 0;
+    if (status.running) {
+      $('importTitle').textContent = 'Importando produção hospitalar…';
+      $('importText').textContent = `${status.current} de ${status.total}${status.file ? ` · ${status.file}` : ''}`;
+      $('importBar').style.width = `${progress}%`;
+      return;
+    }
+    clearInterval(hospitalImportTimer);
+    drawer.classList.add('done');
+    $('importBar').style.width = '100%';
+    if (status.status === 'error') {
+      $('importTitle').textContent = 'Falha na importação hospitalar';
+      $('importText').textContent = status.message || 'Verifique os arquivos RDSP.';
+    } else {
+      const result = status.result || {};
+      const errors = (result.errors || []).length;
+      $('importTitle').textContent = errors ? 'Importação concluída com erros' : 'Importação hospitalar concluída';
+      $('importText').textContent = `${fmt(result.imported)} importados · ${fmt(result.skipped)} sem alteração · ${fmt(errors)} com erro`;
+      await loadHospitalStatus();
+      if (hospitalReport) await applyHospitalFilters();
+      else $('hospitalMessage').textContent = 'Importação concluída. Selecione o período e consulte a produção.';
+    }
+  };
+  tick();
+  hospitalImportTimer = setInterval(tick, 1000);
+}
+
 async function applyFilters() {
   const cnes = unitCode($('unitSearch').value);
   const start = $('startMonth').value;
@@ -74,12 +259,14 @@ async function applyFilters() {
   showNote('Carregando produção…');
   try {
     current = await fetchReport({ cnes, start, end, compare: $('compare').checked, exams: true, procedures: true });
+    updateSelectedUnitBadge(cnes, current.facility.name);
     page = 1;
     const empty = !current.summary.quantity && !current.exam_items.length && !current.procedure_items.length;
     showNote(empty ? 'Não há produção aprovada para esta unidade no período selecionado.' : '');
     renderOverview();
   } catch (err) {
     current = null;
+    updateSelectedUnitBadge('');
     renderOverview();
     showNote(err.message);
   }
@@ -375,6 +562,113 @@ function renderReport(d) {
   $('reportToolbar').hidden = false;
 }
 
+async function generateHospitalReport() {
+  const cnes = unitCode($('hospitalReportUnit').value);
+  const start = $('hospitalReportStart').value;
+  const end = $('hospitalReportEnd').value;
+  if (!cnes) return setHospitalReportMessage('Informe o CNES da unidade (7 números).');
+  if (!start || !end) return setHospitalReportMessage('Escolha o mês inicial e o mês final.');
+  if (start > end) return setHospitalReportMessage('O mês inicial deve ser igual ou anterior ao mês final.');
+  setHospitalReportMessage('Gerando relatório hospitalar…');
+  $('hospitalReportToolbar').hidden = true;
+  try {
+    hospitalReportDocument = await fetchHospitalReport({
+      cnes, start, end, compare: $('hospitalReportCompare').checked,
+    });
+    renderHospitalDocument(hospitalReportDocument);
+    setHospitalReportMessage('');
+  } catch (err) {
+    hospitalReportDocument = null;
+    $('hospitalReportView').hidden = true;
+    setHospitalReportMessage(err.message);
+  }
+}
+
+function setHospitalReportMessage(message) {
+  $('hospitalReportMessage').textContent = message;
+}
+
+function renderHospitalDocument(data) {
+  const compare = data.compare;
+  const summary = data.summary;
+  const unitName = data.facility.name || 'Unidade sem nome cadastrado';
+  const monthlyRows = data.monthly.map(row => `<tr>
+    <td>${esc(row.label)}</td><td>${fmt(row.admissions)}</td>
+    ${compare ? `<td>${fmt(row.previous_admissions)}</td><td class="${tone(row.difference)}">${signed(row.difference)} (${pctText(row.percentage)})</td>` : ''}
+  </tr>`).join('');
+  const monthlyTotal = `<tr>
+    <th>Total</th><th>${fmt(summary.admissions)}</th>
+    ${compare ? `<th>${fmt(summary.previous_admissions)}</th><th class="${tone(summary.difference)}">${signed(summary.difference)} (${pctText(summary.percentage)})</th>` : ''}
+  </tr>`;
+  const procedureRows = data.procedure_items.map(row => `<tr>
+    <td><span class="procedure-name">${esc(row.name || 'Sem descrição cadastrada')}</span><span class="procedure-code">${esc(row.code)}</span></td>
+    <td>${fmt(row.admissions)}</td>
+    ${compare ? `<td>${fmt(row.previous_admissions)}</td><td class="${tone(row.difference)}">${signed(row.difference)} (${pctText(row.percentage)})</td>` : ''}
+    <td>${fmt(row.deaths)}</td><td>${fmt(row.stay_days)}</td><td>${money(row.value_cents)}</td>
+  </tr>`).join('');
+  const chartRows = data.monthly.map(row => ({
+    label: row.label, total_qty: row.admissions, prev_total_qty: row.previous_admissions,
+  }));
+  const empty = summary.admissions === 0
+    ? '<p>Não há internações para esta unidade no período selecionado.</p>' : '';
+
+  $('hospitalReportContent').innerHTML = `
+    <header class="rep-header">
+      <img src="/img/brasao.png" alt="Brasão">
+      <div class="rep-org">
+        <div class="rep-org-main">PREFEITURA MUNICIPAL DE TAUBATÉ</div>
+        <div class="rep-org-sub">SECRETARIA DE SAÚDE</div>
+      </div>
+    </header>
+    <div class="rep-title-block">
+      <div class="rep-title">Relatório de Produção Hospitalar</div>
+      <div class="rep-sub">${esc(unitName)} · CNES ${esc(data.facility.cnes)}</div>
+      <div class="rep-sub">SIH/SUS · ${esc(data.period.label)}</div>
+    </div>
+    <section class="rep-section">
+      <h3>Apresentação e Escopo do Relatório</h3>
+      <p>Este relatório apresenta dados agregados da produção hospitalar da unidade <b>${esc(unitName)}</b>, no período de <b>${esc(data.period.label)}</b>, a partir dos arquivos reduzidos do SIH/SUS importados pelo painel.${compare ? ' A comparação considera o mesmo período do ano anterior.' : ''}</p>
+      ${empty}
+    </section>
+    <section class="rep-section">
+      <h3>Resumo da Produção Hospitalar</h3>
+      <div class="table-scroll"><table class="rep-table">
+        <tbody>
+          <tr><th>Internações</th><td>${fmt(summary.admissions)}</td>${compare ? `<th>Internações no ano anterior</th><td>${fmt(summary.previous_admissions)}</td>` : ''}</tr>
+          <tr><th>Valor total</th><td>${money(summary.value_cents)}</td>${compare ? `<th>Variação de internações</th><td class="${tone(summary.difference)}">${signed(summary.difference)} (${pctText(summary.percentage)})</td>` : ''}</tr>
+          <tr><th>Óbitos</th><td>${fmt(summary.deaths)}</td><th>Permanência média</th><td>${summary.average_stay.toLocaleString('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} dias</td></tr>
+          <tr><th>Dias de permanência</th><td>${fmt(summary.stay_days)}</td><th>Mortalidade hospitalar</th><td>${summary.admissions ? `${(summary.deaths * 100 / summary.admissions).toLocaleString('pt-BR', { maximumFractionDigits: 1 })}%` : '0%'}</td></tr>
+        </tbody>
+      </table></div>
+    </section>
+    <section class="rep-section">
+      <h3>Evolução Mensal das Internações</h3>
+      <div class="table-scroll"><table class="rep-table hospital-report-month-table">
+        <thead><tr><th>Mês</th><th>Internações</th>${compare ? '<th>Ano anterior</th><th>Variação</th>' : ''}</tr></thead>
+        <tbody>${monthlyRows}${monthlyTotal}</tbody>
+      </table></div>
+    </section>
+    <section class="rep-section">
+      <h3>Gráfico de Evolução</h3>
+      <div class="chart-legend">
+        <span><i class="legend-dot current-dot"></i>Período selecionado</span>
+        ${compare ? '<span><i class="legend-dot previous-dot"></i>Ano anterior</span>' : ''}
+      </div>
+      <div class="chart-area rep-chart">${chartSvg(chartRows, compare)}</div>
+    </section>
+    <section class="rep-section hospital-procedure-report">
+      <h3>Detalhamento dos Procedimentos Hospitalares</h3>
+      <p>Foram identificados <b>${fmt(data.procedure_items.length)}</b> procedimentos realizados no período. Os valores correspondem à soma de VAL_TOT nos arquivos RDSP.</p>
+      <div class="table-scroll"><table class="rep-table hospital-report-proc-table">
+        <thead><tr><th>Procedimento</th><th>Internações</th>${compare ? '<th>Ano anterior</th><th>Variação</th>' : ''}<th>Óbitos</th><th>Dias de permanência</th><th>Valor total</th></tr></thead>
+        <tbody>${procedureRows || `<tr><td colspan="${compare ? 7 : 5}" class="table-empty">Nenhum procedimento encontrado.</td></tr>`}</tbody>
+      </table></div>
+    </section>
+  `;
+  $('hospitalReportView').hidden = false;
+  $('hospitalReportToolbar').hidden = false;
+}
+
 document.addEventListener('DOMContentLoaded', async () => {
   const toolbar = document.createElement('div');
   toolbar.id = 'reportToolbar';
@@ -383,6 +677,11 @@ document.addEventListener('DOMContentLoaded', async () => {
   toolbar.innerHTML = '<button id="pdfBtn" class="button button-primary" type="button">Exportar PDF</button>';
   $('reportView').before(toolbar);
   $('pdfBtn').addEventListener('click', () => window.print());
+  $('hospitalReportPdf').addEventListener('click', () => {
+    document.body.classList.add('print-hospital-report');
+    window.print();
+  });
+  window.addEventListener('afterprint', () => document.body.classList.remove('print-hospital-report'));
 
   const now = new Date();
   const ym = (y, m) => `${y}-${String(m).padStart(2, '0')}`;
@@ -392,6 +691,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   $('endMonth').value = endValue;
   $('repStart').value = startValue;
   $('repEnd').value = endValue;
+  $('hospitalUnit').value = '2749319';
+  $('hospitalStart').value = startValue;
+  $('hospitalEnd').value = endValue;
+  $('hospitalReportUnit').value = '2749319';
+  $('hospitalReportStart').value = startValue;
+  $('hospitalReportEnd').value = endValue;
 
   $('applyFilters').addEventListener('click', applyFilters);
   $('refreshBtn').addEventListener('click', () => { loadStatus(); applyFilters(); });
@@ -399,6 +704,16 @@ document.addEventListener('DOMContentLoaded', async () => {
   $('dbcInput').addEventListener('change', e => uploadDbcs(e.target.files));
   $('importClose').addEventListener('click', () => { $('importDrawer').hidden = true; });
   $('exportBtn').addEventListener('click', exportReport);
+  $('generateHospitalReport').addEventListener('click', generateHospitalReport);
+  $('hospitalReportCompare').addEventListener('change', () => {
+    if (hospitalReportDocument) generateHospitalReport();
+  });
+  $('hospitalApply').addEventListener('click', applyHospitalFilters);
+  $('hospitalImportBtn').addEventListener('click', startHospitalImport);
+  $('hospitalRefresh').addEventListener('click', loadHospitalStatus);
+  $('hospitalSearch').addEventListener('input', () => { hospitalPage = 1; renderHospitalReport(); });
+  $('hospitalPrev').addEventListener('click', () => { hospitalPage -= 1; renderHospitalReport(); });
+  $('hospitalNext').addEventListener('click', () => { hospitalPage += 1; renderHospitalReport(); });
 
   document.querySelectorAll('.tab').forEach(tab => tab.addEventListener('click', () => {
     detailTab = tab.dataset.tab;
@@ -415,15 +730,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     $(id).addEventListener('change', () => { if (!$('reportView').hidden) generateReport(); });
   });
 
-  ['repUnit', 'unitSearch'].forEach(id => {
+  ['repUnit', 'unitSearch', 'hospitalUnit', 'hospitalReportUnit'].forEach(id => {
     $(id).addEventListener('input', e => {
       clearTimeout(unitTimer);
       unitTimer = setTimeout(() => searchUnits(e.target.value), 250);
     });
   });
+  $('unitSearch').addEventListener('input', () => updateSelectedUnitBadge(''));
 
   searchUnits('');
   const s = await loadStatus().catch(() => null);
   if (s && s.import && s.import.running) watchImport();
   renderOverview();
+  renderHospitalReport();
 });

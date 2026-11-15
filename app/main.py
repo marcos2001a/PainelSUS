@@ -8,12 +8,15 @@ from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from .config import DATA_DIR, PROJECT_DIR
+from .config import DATA_DIR, HOSPITAL_DATA_DIR, PROJECT_DIR
 from .database import connect, initialize_database
 from .ingest import FILE_PATTERN, discover_files, import_directory
+from .hospital_ingest import discover_files as discover_hospital_files
+from .hospital_ingest import import_directory as import_hospital_directory
 
 IMPORT_LOCK = threading.Lock()
 IMPORT_STATE = {"running": False, "current": 0, "total": 0, "file": None, "status": "idle", "message": None, "result": None}
+HOSPITAL_IMPORT_STATE = {"running": False, "current": 0, "total": 0, "file": None, "status": "idle", "message": None, "result": None}
 MONTH_RE = re.compile(r"(\d{4})-(\d{2})")
 MONTH_NAMES = ["jan", "fev", "mar", "abr", "mai", "jun", "jul", "ago", "set", "out", "nov", "dez"]
 MAX_MONTHS = 36
@@ -83,11 +86,35 @@ def _run_import() -> None:
 
 def _start_import() -> dict:
     with IMPORT_LOCK:
-        if IMPORT_STATE["running"]:
+        if IMPORT_STATE["running"] or HOSPITAL_IMPORT_STATE["running"]:
             raise HTTPException(status_code=409, detail="Já existe uma importação em andamento.")
         IMPORT_STATE.update(running=True, status="running", current=0, total=0, file=None, message=None, result=None)
     threading.Thread(target=_run_import, daemon=True).start()
     return dict(IMPORT_STATE)
+
+def _hospital_progress(event: dict) -> None:
+    HOSPITAL_IMPORT_STATE.update(
+        current=event.get("current", 0), total=event.get("total", 0),
+        file=event.get("file"), message=event.get("error"),
+    )
+
+def _run_hospital_import() -> None:
+    try:
+        result = import_hospital_directory(on_progress=_hospital_progress)
+        HOSPITAL_IMPORT_STATE.update(running=False, status="done", result=result)
+    except Exception as exc:
+        HOSPITAL_IMPORT_STATE.update(running=False, status="error", message=str(exc))
+
+def _start_hospital_import() -> dict:
+    with IMPORT_LOCK:
+        if IMPORT_STATE["running"] or HOSPITAL_IMPORT_STATE["running"]:
+            raise HTTPException(status_code=409, detail="Já existe uma importação em andamento.")
+        HOSPITAL_IMPORT_STATE.update(
+            running=True, status="running", current=0, total=0,
+            file=None, message=None, result=None,
+        )
+    threading.Thread(target=_run_hospital_import, daemon=True).start()
+    return dict(HOSPITAL_IMPORT_STATE)
 
 @app.get("/", include_in_schema=False)
 def home() -> FileResponse:
@@ -118,7 +145,7 @@ def status() -> dict:
 
 @app.post("/api/import")
 def start_import(files: list[UploadFile] = File(default=[])) -> dict:
-    if IMPORT_STATE["running"]:
+    if IMPORT_STATE["running"] or HOSPITAL_IMPORT_STATE["running"]:
         raise HTTPException(status_code=409, detail="Já existe uma importação em andamento.")
     if files:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -143,13 +170,130 @@ def units(q: str = Query(default="", max_length=80)) -> list[dict]:
     term = q.strip()
     with connect() as connection:
         rows = connection.execute(
-            "SELECT production.cnes, COALESCE(MAX(facilities.name), '') AS name "
-            "FROM production LEFT JOIN facilities ON facilities.cnes = production.cnes "
-            "WHERE production.cnes LIKE ? OR facilities.name LIKE ? "
-            "GROUP BY production.cnes ORDER BY name COLLATE NOCASE LIMIT 100",
+            "SELECT cnes, COALESCE(name, '') AS name FROM facilities "
+            "WHERE cnes LIKE ? OR name LIKE ? "
+            "ORDER BY name COLLATE NOCASE LIMIT 100",
             (f"%{term}%", f"%{term}%"),
         ).fetchall()
     return [{"cnes": row["cnes"], "name": row["name"]} for row in rows]
+
+@app.get("/api/hospital/status")
+def hospital_status() -> dict:
+    with connect() as connection:
+        summary = connection.execute(
+            "SELECT (SELECT COUNT(*) FROM hospital_source_files) AS imported_files, "
+            "(SELECT COALESCE(SUM(record_count), 0) FROM hospital_source_files) AS source_records, "
+            "MIN(hospital_production.competence) AS first_competence, "
+            "MAX(hospital_production.competence) AS last_competence "
+            "FROM hospital_production"
+        ).fetchone()
+        file_count = len(discover_hospital_files(HOSPITAL_DATA_DIR)) if HOSPITAL_DATA_DIR.is_dir() else 0
+    return {
+        "data_directory_exists": HOSPITAL_DATA_DIR.is_dir(),
+        "available_files": file_count,
+        "imported_files": summary["imported_files"],
+        "source_records": summary["source_records"],
+        "first_competence": summary["first_competence"],
+        "last_competence": summary["last_competence"],
+        "import": dict(HOSPITAL_IMPORT_STATE),
+    }
+
+@app.post("/api/hospital/import")
+def start_hospital_import() -> dict:
+    return _start_hospital_import()
+
+@app.get("/api/hospital/import/status")
+def hospital_import_status() -> dict:
+    return dict(HOSPITAL_IMPORT_STATE)
+
+@app.get("/api/hospital/report")
+def get_hospital_report(
+    cnes: str = Query(pattern=r"^\d{7}$"),
+    start: str = Query(max_length=7),
+    end: str = Query(max_length=7),
+    compare: bool = False,
+) -> dict:
+    start_ym, end_ym = parse_month(start), parse_month(end)
+    months = months_between(start_ym, end_ym)
+    if not months or len(months) > MAX_MONTHS:
+        raise HTTPException(status_code=400, detail=f"Escolha um período de 1 a {MAX_MONTHS} meses, com início antes do fim.")
+    prev_start = (start_ym[0] - 1, start_ym[1])
+    prev_end = (end_ym[0] - 1, end_ym[1])
+    query = (
+        "SELECT competence, procedure_code, SUM(admissions) AS admissions, "
+        "SUM(deaths) AS deaths, SUM(length_of_stay_days) AS stay_days, "
+        "SUM(total_value_cents) AS value_cents FROM hospital_production "
+        "WHERE cnes = ? AND competence BETWEEN ? AND ? GROUP BY competence, procedure_code"
+    )
+    with connect() as connection:
+        facility = connection.execute("SELECT name FROM facilities WHERE cnes = ?", (cnes,)).fetchone()
+        rows = connection.execute(query, (cnes, competence(start_ym), competence(end_ym))).fetchall()
+        previous_rows = connection.execute(query, (cnes, competence(prev_start), competence(prev_end))).fetchall() if compare else []
+        descriptions = {
+            row["code"]: row["description"]
+            for row in connection.execute("SELECT code, description FROM procedures").fetchall()
+        }
+
+    monthly = {
+        competence(ym): {"admissions": 0, "previous_admissions": 0, "deaths": 0, "stay_days": 0, "value_cents": 0}
+        for ym in months
+    }
+    items = {}
+    def item(code: str) -> dict:
+        return items.setdefault(code, {
+            "code": code, "name": descriptions.get(code, ""), "admissions": 0,
+            "previous_admissions": 0, "deaths": 0, "stay_days": 0, "value_cents": 0,
+        })
+
+    for row in rows:
+        bucket = monthly.get(row["competence"])
+        if bucket is None:
+            continue
+        code = row["procedure_code"]
+        target = item(code)
+        for key, source in (("admissions", "admissions"), ("deaths", "deaths"), ("stay_days", "stay_days"), ("value_cents", "value_cents")):
+            value = row[source] or 0
+            bucket[key] += value
+            target[key] += value
+    for row in previous_rows:
+        key = f"{int(row['competence'][:4]) + 1}{row['competence'][4:]}"
+        if key in monthly:
+            monthly[key]["previous_admissions"] += row["admissions"] or 0
+            item(row["procedure_code"])["previous_admissions"] += row["admissions"] or 0
+
+    monthly_rows = []
+    for ym in months:
+        key = competence(ym)
+        row = monthly[key]
+        row["competence"] = key
+        row["label"] = month_label(ym)
+        row["difference"] = row["admissions"] - row["previous_admissions"]
+        row["percentage"] = pct(row["admissions"], row["previous_admissions"])
+        monthly_rows.append(row)
+    current_total = sum(row["admissions"] for row in monthly_rows)
+    previous_total = sum(row["previous_admissions"] for row in monthly_rows)
+    procedure_items = sorted(items.values(), key=lambda row: (-row["admissions"], row["code"]))
+    for row in procedure_items:
+        row["difference"] = row["admissions"] - row["previous_admissions"]
+        row["percentage"] = pct(row["admissions"], row["previous_admissions"])
+
+    return {
+        "facility": {"cnes": cnes, "name": facility["name"] if facility else ""},
+        "period": {"start": competence(start_ym), "end": competence(end_ym), "label": f"{month_label(start_ym)} a {month_label(end_ym)}"},
+        "compare": compare,
+        "summary": {
+            "admissions": current_total,
+            "previous_admissions": previous_total,
+            "deaths": sum(row["deaths"] for row in monthly_rows),
+            "stay_days": sum(row["stay_days"] for row in monthly_rows),
+            "average_stay": round(sum(row["stay_days"] for row in monthly_rows) / current_total, 1) if current_total else 0,
+            "value_cents": sum(row["value_cents"] for row in monthly_rows),
+            "difference": current_total - previous_total,
+            "percentage": pct(current_total, previous_total),
+        },
+        "monthly": monthly_rows,
+        "procedure_items": procedure_items,
+    }
 
 @app.get("/api/report")
 def get_report(

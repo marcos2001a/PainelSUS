@@ -20,6 +20,16 @@ ser avaliado se a aplicação passar a atender usuários simultâneos em rede.
 3. Abra `http://127.0.0.1:8000`.
 4. Clique em **Importar DBCs** na mensagem apresentada pelo painel.
 
+## Produção hospitalar (SIH/SUS)
+
+O menu **Prod. Hospitalar** consulta os arquivos reduzidos `RDSP*.dbc` do SIH/SUS.
+Por padrão, os arquivos são procurados em `C:\SUS\TABWIN\DADOS\RD 2026`; a pasta
+pode ser alterada com `TABWIN_RD_DATA_DIR`. Use **Importar DBCs RDSP** para importar
+ou atualizar as competências disponíveis. O painel apresenta internações, valor
+total (`VAL_TOT`), óbitos, permanência e procedimentos realizados, com comparação
+anual opcional. O SQLite guarda somente agregados por CNES, competência e
+procedimento; os campos identificadores dos registros de AIH não são persistidos.
+
 A primeira importação lê os DBCs sequencialmente. Cada arquivo é expandido
 temporariamente e removido ao terminar; os DBCs originais não são alterados.
 Os imports já concluídos são reutilizados quando tamanho e data de modificação

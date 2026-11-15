@@ -28,6 +28,7 @@ button { cursor: pointer; }
 .brand-accent { color: #68d3a2; }
 .navigation { display: grid; gap: 5px; }
 .nav-item { display: flex; align-items: center; gap: 11px; padding: 11px 12px; border-radius: 8px; color: #b6c8c0; font-size: 13px; text-decoration: none; cursor: pointer; }
+.nav-sub-item { margin-left: 17px; padding-left: 10px; font-size: 12px; }
 .nav-item.active { background: #204638; color: #fff; font-weight: 600; }
 .nav-icon { display: inline-flex; width: 18px; justify-content: center; color: #79d8ad; font-size: 17px; }
 
@@ -48,6 +49,7 @@ h1, h2, h3, p { margin: 0; }
 h1 { margin-top: 9px; font-family: Manrope, sans-serif; font-size: clamp(24px, 2.5vw, 31px); font-weight: 700; letter-spacing: -1.2px; }
 .page-subtitle { margin-top: 5px; color: var(--muted); font-size: 12px; }
 .heading-actions { display: flex; align-items: center; gap: 8px; }
+.selected-unit-badge { max-width: 280px; overflow: hidden; padding: 9px 12px; border-radius: 8px; background: var(--green); color: #fff; font-size: 11px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
 .button { display: inline-flex; min-height: 37px; align-items: center; justify-content: center; gap: 8px; padding: 0 14px; border: 1px solid transparent; border-radius: 7px; font-size: 11px; font-weight: 600; transition: .15s ease; }
 .button-outline { border-color: #dce4df; background: #fff; color: #52615a; }
 .button-outline:hover:not(:disabled) { border-color: #a7ccb8; color: var(--green); }
@@ -59,11 +61,14 @@ h1 { margin-top: 9px; font-family: Manrope, sans-serif; font-size: clamp(24px, 2
 .filter-field label { display: block; margin: 0 0 7px 1px; color: #7d8782; font-size: 9px; font-weight: 700; letter-spacing: .09em; }
 .select-wrap { position: relative; }
 .select-wrap input, .filter-field input, .table-actions select, .report-select { width: 100%; height: 37px; border: 1px solid #e6eae6; border-radius: 6px; outline: none; background: #fff; color: #35423c; font-size: 11px; }
-.select-wrap input { padding: 0 10px 0 33px; }
+.select-wrap input { padding: 0 10px 0 42px; }
 .select-wrap input::placeholder { color: #9aa39e; }
+.select-wrap:has(input:not(:placeholder-shown)) .field-icon { display: none; }
+.select-wrap:has(input:not(:placeholder-shown)) input { padding-left: 10px; }
 .select-wrap input:focus, .filter-field input:focus, .table-actions select:focus, .search-box:focus-within { border-color: #88c7a6; box-shadow: 0 0 0 3px #49b78317; }
 .field-icon { position: absolute; z-index: 1; top: 8px; left: 11px; color: #798680; font-size: 19px; pointer-events: none; }
 .filter-field input { padding: 0 10px; }
+.select-wrap input { padding-left: 42px; }
 .filter-panel .button { height: 37px; }
 .compare-field { display: flex; align-items: center; gap: 8px; padding: 0 12px; border: 1px solid #e9ece8; border-radius: 10px; background: #fff; min-height: 37px; }
 .checkbox-label { display: flex; align-items: center; gap: 6px; color: #78827d; font-size: 9px; cursor: pointer; margin: 0; }
@@ -163,6 +168,14 @@ tbody tr:last-child td { border-bottom: 0; }
 
 .report-panel { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; padding: 15px 16px; margin-bottom: 14px; border: 1px solid #e9ece8; border-radius: 10px; background: #fff; box-shadow: 0 2px 5px #1e372512; }
 .report-panel .filter-field { min-width: 140px; }
+.hospital-filter-panel { align-items: end; }
+.hospital-filter-panel .filter-field:first-child { flex: 1 1 250px; }
+.hospital-filter-panel .filter-field:not(:first-child) { flex: 0 1 155px; }
+.hospital-filter-panel > .checkbox-label { min-height: 37px; }
+.hospital-report-panel { align-items: end; }
+.hospital-report-panel .filter-field:first-child { flex: 1 1 250px; }
+.hospital-report-panel .filter-field:not(:first-child) { flex: 0 1 155px; }
+.hospital-report-panel > .checkbox-label { min-height: 37px; }
 .report-options { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; min-height: 37px; }
 .report-toolbar { display: flex; justify-content: flex-end; margin: 14px 0 0; }
 .report-paper { width: 210mm; max-width: 100%; min-height: 297mm; margin: 0 auto 28px; padding: 40px 48px; background: #fff; color: #1d2925; border: 1px solid #e9ece8; border-radius: 6px; box-shadow: 0 2px 5px #1e37250b; }
@@ -186,6 +199,25 @@ tbody tr:last-child td { border-bottom: 0; }
 .rep-table th:not(:first-child), .rep-table td:not(:first-child) { text-align: right; }
 .rep-blue-text { color: var(--blue); font-weight: 700; }
 .rep-red-text { color: var(--red); font-weight: 700; }
+.hospital-summary { display: grid; gap: 0; flex: 1; align-content: start; margin-top: 14px; }
+.hospital-summary-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 0; border-bottom: 1px solid #f0f2ef; color: #7c8781; font-size: 10px; }
+.hospital-summary-row:last-child { border-bottom: 0; }
+.hospital-summary-row strong { color: #35433b; font-size: 12px; text-align: right; }
+.hospital-table-panel { padding-bottom: 0; }
+.hospital-table-panel table { height: auto; table-layout: fixed; }
+.hospital-table-panel th, .hospital-table-panel td { padding: 10px 11px; line-height: normal; }
+.hospital-table-panel tbody tr { height: auto; }
+.hospital-table-panel table thead th:nth-child(1) { width: 38%; }
+.hospital-table-panel table thead th:nth-child(2),
+.hospital-table-panel table thead th:nth-child(3) { width: 12%; }
+.hospital-table-panel table thead th:nth-child(4) { width: 8%; }
+.hospital-table-panel table thead th:nth-child(5),
+.hospital-table-panel table thead th:nth-child(6) { width: 15%; }
+.hospital-table-panel th:not(:first-child), .hospital-table-panel td:not(:first-child) { text-align: right; }
+.hospital-table-panel td:first-child { overflow-wrap: anywhere; }
+#hospitalReportView .hospital-procedure-report { break-inside: auto; }
+#hospitalReportView .hospital-procedure-report tr { break-inside: avoid; }
+#hospitalReportView .hospital-procedure-report thead { display: table-header-group; }
 
 .toast { position: fixed; right: 22px; bottom: 20px; z-index: 6; max-width: 430px; padding: 12px 16px; border: 1px solid #dfe7e1; border-radius: 8px; background: #fff; box-shadow: 0 6px 25px #183a2822; color: #435149; font-size: 11px; opacity: 0; pointer-events: none; transform: translateY(8px); transition: .2s ease; }
 .toast.show { opacity: 1; transform: translateY(0); }
@@ -208,6 +240,18 @@ tbody tr:last-child td { border-bottom: 0; }
   body { background: #fff; }
   .report-paper { width: auto; min-height: 0; margin: 0; padding: 0; border: 0; box-shadow: none; }
   .rep-section, .rep-header, .rep-title-block { break-inside: avoid; }
+  body.print-hospital-report .sidebar,
+  body.print-hospital-report #overview,
+  body.print-hospital-report #reports,
+  body.print-hospital-report #hospital,
+  body.print-hospital-report #hospitalReports .topbar,
+  body.print-hospital-report #hospitalReports .page-heading,
+  body.print-hospital-report #hospitalReportControls,
+  body.print-hospital-report #hospitalReportMessage,
+  body.print-hospital-report #hospitalReportToolbar,
+  body.print-hospital-report #toast,
+  body.print-hospital-report #importDrawer { display: none !important; }
+  body.print-hospital-report #hospitalReportView .rep-section.hospital-procedure-report { break-inside: auto; }
 }
 @media (min-width: 1500px) { .main-content { padding-right: 56px; padding-left: 56px; } }
 @media (max-width: 1150px) {
@@ -242,6 +286,7 @@ tbody tr:last-child td { border-bottom: 0; }
   .search-box { flex: 1; width: auto; }
   .table-actions select { width: 115px; }
   .procedures-panel table { min-width: 620px; }
+  .hospital-table-panel table { min-width: 850px; }
   .report-paper { padding: 24px 18px; }
   .page-footer { flex-direction: column; line-height: 1.5; }
 }
@@ -267,8 +312,10 @@ tbody tr:last-child td { border-bottom: 0; }
   .brand strong { display: none; }
   .navigation { width: 100%; margin-left: 0; }
   .navigation .nav-item { flex: 1 1 0; justify-content: center; padding: 8px 6px; font-size: 11px; }
+  .navigation .nav-sub-item { margin-left: 0; }
   .main-content { padding-right: 12px; padding-left: 12px; }
   .topbar { min-height: 0; }
   .breadcrumb { flex-wrap: wrap; font-size: 10px; }
   .report-panel .filter-field { flex: 1 1 100%; }
+  .hospital-report-panel .filter-field { flex: 1 1 100%; }
 }
